@@ -70,6 +70,17 @@ static u8   be_quiet,           /* Quiet mode (no stderr output)        */
 static u32  inst_ratio = 100,   /* Instrumentation probability (%)      */
             as_par_cnt = 1;     /* Number of params to 'as'             */
 
+/* This is a custom hash function to distinguish the input files. */
+static u32 custom_hash(u8 * s) {
+  u32 hash_value = 0;
+
+  for (; (*s) != 0; ++ s) {
+    hash_value = ((unsigned long long) hash_value * 257 + (*s) + 1) % 1000000007;
+  }
+
+  return hash_value;
+}
+
 /* If we don't find --32 or --64 in the command line, default to 
    instrumentation for whichever mode we were compiled with. This is not
    perfect, but should do the trick for almost all use cases. */
@@ -268,7 +279,7 @@ static void add_instrumentation(void) {
         instrument_next && line[0] == '\t' && isalpha(line[1])) {
 
       fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-              R(MAP_SIZE));
+              R(MAP_SIZE), custom_hash(input_file));
 
       instrument_next = 0;
       ins_lines++;
@@ -374,7 +385,7 @@ static void add_instrumentation(void) {
       if (line[1] == 'j' && line[2] != 'm' && R(100) < inst_ratio) {
 
         fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
-                R(MAP_SIZE));
+                R(MAP_SIZE), custom_hash(input_file));
 
         ins_lines++;
 
@@ -461,11 +472,13 @@ static void add_instrumentation(void) {
 
     if (!ins_lines) WARNF("No instrumentation targets found%s.",
                           pass_thru ? " (pass-thru mode)" : "");
-    else OKF("Instrumented %u locations (%s-bit, %s mode, ratio %u%%).",
+    else OKF("Instrumented %u locations (%s-bit, %s mode, ratio %u%%, input file %s, input file hash %u).",
              ins_lines, use_64bit ? "64" : "32",
              getenv("AFL_HARDEN") ? "hardened" : 
              (sanitizer ? "ASAN/MSAN" : "non-hardened"),
-             inst_ratio);
+             inst_ratio,
+	     input_file,
+	     custom_hash(input_file));
  
   }
 

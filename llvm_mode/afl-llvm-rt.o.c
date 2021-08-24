@@ -61,6 +61,9 @@ u8  __afl_area_initial[MAP_SIZE];
 u8* __afl_area_ptr = __afl_area_initial;
 
 __thread u32 __afl_prev_loc;
+__thread u32 __afl_prev_fuboat_loc;
+__thread u32 __afl_prev_prev_fuboat_loc;
+__thread u32 __afl_prev_file_id;
 
 
 /* Running in persistent mode? */
@@ -197,7 +200,7 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 
       memset(__afl_area_ptr, 0, MAP_SIZE);
       __afl_area_ptr[0] = 1;
-      __afl_prev_loc = 0;
+      __afl_prev_loc = __afl_prev_fuboat_loc = __afl_prev_prev_fuboat_loc = __afl_prev_file_id = 0;
     }
 
     cycle_cnt  = max_cnt;
@@ -213,7 +216,7 @@ int __afl_persistent_loop(unsigned int max_cnt) {
       raise(SIGSTOP);
 
       __afl_area_ptr[0] = 1;
-      __afl_prev_loc = 0;
+      __afl_prev_loc = __afl_prev_fuboat_loc = __afl_prev_prev_fuboat_loc = __afl_prev_file_id = 0;
 
       return 1;
 
