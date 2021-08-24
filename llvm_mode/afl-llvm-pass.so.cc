@@ -38,6 +38,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <list>
+#include <string>
+#include <fstream>
+
 #if defined(LLVM34)
 #include "llvm/DebugInfo.h"
 #else
@@ -64,7 +68,21 @@ namespace {
     public:
 
       static char ID;
-      AFLCoverage() : ModulePass(ID) { }
+      AFLCoverage() : ModulePass(ID) {
+	char* instWhiteListFilename = getenv("AFL_INST_WHITELIST");
+        if (instWhiteListFilename) {
+          std::ifstream fileStream;
+          fileStream.open(instWhiteListFilename);
+          if (!fileStream) report_fatal_error("Unable to open AFL_INST_WHITELIST");
+
+          std::string line;
+          getline(fileStream, line);
+          while (fileStream) {
+            myWhitelist.push_back(line);
+            getline(fileStream, line);
+          }
+        }
+      }
 
       bool runOnModule(Module &M) override;
 
@@ -82,6 +100,9 @@ namespace {
     
       return hash_value;
     }
+    
+  protected:
+    std::list<std::string> myWhitelist;
   };
 }
 
@@ -203,6 +224,29 @@ bool AFLCoverage::runOnModule(Module &M) {
 
 	  /* Continue only if we know where we actually are */
 	  if (!instFilename.str().empty()) {
+	    if (!myWhitelist.empty()) {
+	      /* If whitelist is not empty, we only insert inst into files in list. */
+	      bool instrumentBlock = false;
+	      
+	      for (std::list<std::string>::iterator it = myWhitelist.begin(); it != myWhitelist.end(); ++it) {
+		/* We don't check for filename equality here because
+		 * filenames might actually be full paths. Instead we
+		 * check that the actual filename ends in the filename
+		 * specified in the list. */
+		if (instFilename.str().length() >= it->length()) {
+		  if (instFilename.str().compare(instFilename.str().length() - it->length(), it->length(), *it) == 0) {
+		    instrumentBlock = true;
+		    break;
+		  }
+		}
+	      }
+
+	      /* If file name is not in list, then do nothing. */
+	      if (!instrumentBlock) {
+		continue;
+	      }
+	    }
+	    
 	    /* If filename is known, set file_name_hash to the hash value of int. */
 	    file_name_hash = custom_hash(instFilename.str().c_str());
 	    fprintf(stderr, "filename = %s, hash = %u\n", instFilename.str().c_str(), file_name_hash);
