@@ -251,7 +251,9 @@ bool AFLCoverage::runOnModule(Module &M) {
 	    file_name_hash = custom_hash(instFilename.str().c_str());
 	    fprintf(stderr, "filename = %s, hash = %u\n", instFilename.str().c_str(), file_name_hash);
 	  } 
-	}
+	} else {
+	continue;
+      }
 
       fprintf(stderr, "hash = %u\n", file_name_hash);
 
