@@ -233,7 +233,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 		 * filenames might actually be full paths. Instead we
 		 * check that the actual filename ends in the filename
 		 * specified in the list. */
-		if (instFilename.str().length() >= it->length()) {
+		if (instFilename.str().length() >= it->length() && it->length() > 0) {
 		  if (instFilename.str().compare(instFilename.str().length() - it->length(), it->length(), *it) == 0) {
 		    instrumentBlock = true;
 		    break;
