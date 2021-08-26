@@ -41,6 +41,8 @@
 #include <list>
 #include <string>
 #include <fstream>
+#include <vector>
+#include <map>
 
 #if defined(LLVM34)
 #include "llvm/DebugInfo.h"
@@ -58,6 +60,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
 
@@ -82,6 +85,16 @@ namespace {
             getline(fileStream, line);
           }
         }
+
+	char * path_count_str = getenv("AFL_PATH_COUNT");
+	if (path_count_str) {
+	  path_count = 2;
+	  sscanf(path_count_str, "%u", &path_count);
+	  if (path_count < 2) path_count = 2;
+	  if (path_count > LLVM_MAX_LOC_COUNT) path_count = LLVM_MAX_LOC_COUNT;
+	} else {
+	  path_count = 2;
+	}
       }
 
       bool runOnModule(Module &M) override;
@@ -100,9 +113,83 @@ namespace {
     
       return hash_value;
     }
+
+    bool getInstFileName(Instruction * IP, std::string & filename) {
+      /* Make up file id */
+      
+      DebugLoc Loc = IP->getDebugLoc();
+#ifdef LLVM_OLD_DEBUG_API
+      if ( !Loc.isUnknown() )
+#else
+	if ( Loc )
+#endif /* LLVM_OLD_DEBUG_API */
+	  
+	  {
+#ifdef LLVM_OLD_DEBUG_API
+	    DILocation cDILoc(Loc.getAsMDNode(M.getContext()));
+	    DILocation oDILoc = cDILoc.getOrigLocation();
+	    
+	    unsigned int instLine = oDILoc.getLineNumber();
+	    StringRef instFilename = oDILoc.getFilename();
+	    
+	    if (instFilename.str().empty()) {
+	      /* If the original location is empty, use the actual location */
+	      instFilename = cDILoc.getFilename();
+	      instLine = cDILoc.getLineNumber();
+	    }
+#else
+	    DILocation *cDILoc = dyn_cast<DILocation>(Loc.getAsMDNode());
+
+	    unsigned int instLine = cDILoc->getLine();
+	    StringRef instFilename = cDILoc->getFilename();
+
+	    if (instFilename.str().empty()) {
+	      /* If the original location is empty, try using the inlined location */
+	      DILocation *oDILoc = cDILoc->getInlinedAt();
+	      if (oDILoc) {
+		instFilename = oDILoc->getFilename();
+		instLine = oDILoc->getLine();
+	      }
+	    }
+
+#endif /* LLVM_OLD_DEBUG_API */
+
+	    filename = instFilename.str();
+
+	    return true;
+	  } else {
+	  return false;
+	}      
+    }
+
+    bool checkInWhiteList(const std::string & filename) {
+      /* Continue only if we know where we actually are */
+      if (!myWhitelist.empty()) {
+	/* If whitelist is not empty, we only insert inst into files in list. */
+	
+	for (std::list<std::string>::iterator it = myWhitelist.begin(); it != myWhitelist.end(); ++it) {
+	  /* We don't check for filename equality here because
+	   * filenames might actually be full paths. Instead we
+	   * check that the actual filename ends in the filename
+	   * specified in the list. */
+	  if (filename.length() >= it->length() && it->length() > 0) {
+	    if (filename.compare(filename.length() - it->length(), it->length(), *it) == 0) {
+	      return true;
+	    }
+	  }
+	}
+
+	/* If file name is not in list, then do nothing. */
+	return false;
+      }
+
+      return true;
+    }
     
   protected:
     std::list<std::string> myWhitelist;
+
+    int path_count;
   };
 }
 
@@ -147,188 +234,159 @@ bool AFLCoverage::runOnModule(Module &M) {
                          GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
 
   GlobalVariable *AFLPrevLoc = new GlobalVariable(
-      M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc",
-      0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
-
-  GlobalVariable *AFLPrevFuboatLoc =
-    new GlobalVariable(
-		       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_fuboat_loc",
-		       0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
-
-  GlobalVariable *AFLPrevPrevFuboatLoc =
-    new GlobalVariable(
-		       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_prev_fuboat_loc",
-		       0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+      M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc"
+      , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
   GlobalVariable *AFLPrevFileId =
     new GlobalVariable(
-		       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_file_id",
-		       0, GlobalVariable::GeneralDynamicTLSModel, 0, false);  
+		       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_file_id"
+		       // );
+		       , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+
+  GlobalVariable *AFLPrevLocsPtr =
+      new GlobalVariable(M, PointerType::get(Int32Ty, 0), false,
+                         GlobalValue::ExternalLinkage, 0, "__afl_prev_locs"
+			 // );
+			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+
+  GlobalVariable *AFLCurIndex = new GlobalVariable(
+      M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_cur_index"
+						   // );
+      , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+
+  GlobalVariable *AFLAreaIndex = new GlobalVariable(
+      M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_area_index"
+						    // );
+      , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);  
+  
 
   /* Instrument all the things! */
 
   int inst_blocks = 0;
 
+  std::vector<BasicBlock*> BasicBlocksToInsert;
+  std::map<BasicBlock*, unsigned int> basicBlockLocId;
+  std::map<BasicBlock*, unsigned int> basicBlockFileNameId;
+  
   for (auto &F : M)
     for (auto &BB : F) {
-
+      std::string filename;
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
-      IRBuilder<> IRB(&(*IP));
 
+      if (!getInstFileName(&*IP, filename)) continue;
+      if (!checkInWhiteList(filename)) continue;
       if (AFL_R(100) >= inst_ratio) continue;
-
-      /* Make up cur_loc */
-
-      unsigned int cur_loc = AFL_R(MAP_SIZE);
-      unsigned int file_name_hash = 0;
-
-      ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
-
-      /* Make up file id */
-
-      DebugLoc Loc = IP->getDebugLoc();
-#ifdef LLVM_OLD_DEBUG_API
-      if ( !Loc.isUnknown() )
-#else
-      if ( Loc )
-#endif /* LLVM_OLD_DEBUG_API */
-
-	{
-#ifdef LLVM_OLD_DEBUG_API
-	  DILocation cDILoc(Loc.getAsMDNode(M.getContext()));
-	  DILocation oDILoc = cDILoc.getOrigLocation();
-	  
-	  unsigned int instLine = oDILoc.getLineNumber();
-	  StringRef instFilename = oDILoc.getFilename();
-	  
-	  if (instFilename.str().empty()) {
-	    /* If the original location is empty, use the actual location */
-	    instFilename = cDILoc.getFilename();
-	    instLine = cDILoc.getLineNumber();
-	  }
-#else
-	  DILocation *cDILoc = dyn_cast<DILocation>(Loc.getAsMDNode());
-
-	  unsigned int instLine = cDILoc->getLine();
-	  StringRef instFilename = cDILoc->getFilename();
-
-	  if (instFilename.str().empty()) {
-	    /* If the original location is empty, try using the inlined location */
-	    DILocation *oDILoc = cDILoc->getInlinedAt();
-	    if (oDILoc) {
-	      instFilename = oDILoc->getFilename();
-	      instLine = oDILoc->getLine();
-	    }
-	  }
-#endif /* LLVM_OLD_DEBUG_API */
-
-	  /* Continue only if we know where we actually are */
-	  if (!instFilename.str().empty()) {
-	    if (!myWhitelist.empty()) {
-	      /* If whitelist is not empty, we only insert inst into files in list. */
-	      bool instrumentBlock = false;
-	      
-	      for (std::list<std::string>::iterator it = myWhitelist.begin(); it != myWhitelist.end(); ++it) {
-		/* We don't check for filename equality here because
-		 * filenames might actually be full paths. Instead we
-		 * check that the actual filename ends in the filename
-		 * specified in the list. */
-		if (instFilename.str().length() >= it->length() && it->length() > 0) {
-		  if (instFilename.str().compare(instFilename.str().length() - it->length(), it->length(), *it) == 0) {
-		    instrumentBlock = true;
-		    break;
-		  }
-		}
-	      }
-
-	      /* If file name is not in list, then do nothing. */
-	      if (!instrumentBlock) {
-		continue;
-	      }
-	    }
-	    
-	    /* If filename is known, set file_name_hash to the hash value of int. */
-	    file_name_hash = custom_hash(instFilename.str().c_str());
-	    fprintf(stderr, "filename = %s, hash = %u\n", instFilename.str().c_str(), file_name_hash);
-	  } 
-	} else {
-	continue;
-      }
-
-      fprintf(stderr, "hash = %u\n", file_name_hash);
-
-      ConstantInt *CurFileId = ConstantInt::get(Int32Ty, file_name_hash);
       
-      LoadInst * PrevFileId = IRB.CreateLoad(AFLPrevFileId);
-      PrevFileId->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      Value *PrevFileIdCasted = IRB.CreateZExt(PrevFileId, IRB.getInt32Ty());
-      
-      /* Calc $(file_id == previous_file_id) and $(file_id != previous_file_id) */
-      Value *Eq    = IRB.CreateICmpEQ(PrevFileIdCasted, CurFileId);
-      Value *Neq   = IRB.CreateICmpNE(PrevFileIdCasted, CurFileId);
-      Value *Eq8  = IRB.CreateZExt(Eq,  IRB.getInt8Ty());
-      Value *Neq8  = IRB.CreateZExt(Neq,  IRB.getInt8Ty());
-      Value *Eq32  = IRB.CreateZExt(Eq,  IRB.getInt32Ty());
-      Value *Neq32 = IRB.CreateZExt(Neq, IRB.getInt32Ty());
-      
-      /* Load prev_loc */
-
-      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
-      PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
-
-      LoadInst *PrevPrevFuboatLoc = IRB.CreateLoad(AFLPrevPrevFuboatLoc);
-      PrevPrevFuboatLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      
-      LoadInst *PrevFuboatLoc = IRB.CreateLoad(AFLPrevFuboatLoc);
-      PrevFuboatLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-      /* Load SHM pointer */
-
-      LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
-      MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      Value *MapPtrIdx =
-	IRB.CreateGEP(MapPtr, IRB.CreateMul(IRB.CreateXor(CurLoc, IRB.CreateXor(PrevLocCasted, IRB.CreateXor(PrevFuboatLoc, PrevPrevFuboatLoc))), Neq32));
-
-      /* Update bitmap */
-
-      LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
-      Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      Value *Incr = IRB.CreateAdd(Counter, IRB.CreateMul(ConstantInt::get(Int8Ty, 1), Neq8));
-      IRB.CreateStore(Incr, MapPtrIdx)
-          ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-      /* Set prev2 = prev2 * eq + (prev_loc >> 2) * neq */
-
-      StoreInst *StorePrevPrev =
-	IRB.CreateStore(IRB.CreateAdd(IRB.CreateMul(PrevPrevFuboatLoc, Eq32),
-				      IRB.CreateMul(IRB.CreateLShr(PrevLocCasted, ConstantInt::get(Int32Ty, 2)), Neq32)),
-			AFLPrevPrevFuboatLoc);
-      StorePrevPrev->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      
-      /* Set prev = prev * eq + (cur_loc >> 2) * neq */
-
-      StoreInst *StorePrev =
-	IRB.CreateStore(IRB.CreateAdd(IRB.CreateMul(PrevFuboatLoc, Eq32),
-				      IRB.CreateMul(ConstantInt::get(Int32Ty, cur_loc >> 2), Neq32)),
-			AFLPrevFuboatLoc);
-      StorePrev->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      
-      /* Set prev_loc to cur_loc >> 1 */
-
-      StoreInst *Store =
-          IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
-      Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-      /* Set prev_file_id to file_name_hash */
-
-      StoreInst *StoreFileId =
-	IRB.CreateStore(ConstantInt::get(Int32Ty, file_name_hash), AFLPrevFileId);
-      StoreFileId->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      
-      inst_blocks++;
-
+      BasicBlocksToInsert.push_back(&BB);
+      basicBlockLocId[&BB] = AFL_R(MAP_SIZE);
+      basicBlockFileNameId[&BB] = custom_hash(filename.c_str());
     }
+
+  /* Normal: update previous file id and previous loc. */
+  for (auto BB : BasicBlocksToInsert) {
+    BasicBlock::iterator IP = BB->getFirstInsertionPt();
+    IRBuilder<> IRB(&(*IP));
+
+    unsigned int cur_loc = basicBlockLocId[BB];
+    unsigned int file_name_hash = basicBlockFileNameId[BB];
+
+    ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+    ConstantInt *CurFileId = ConstantInt::get(Int32Ty, file_name_hash);
+
+    LoadInst * PrevFileId = IRB.CreateLoad(AFLPrevFileId);
+    LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+
+    PrevFileId->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+    StoreInst *Store =
+      IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
+    StoreInst *StoreFileId =
+      IRB.CreateStore(ConstantInt::get(Int32Ty, file_name_hash), AFLPrevFileId);
+    
+    Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    StoreFileId->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+  }
+  
+  /* Add If branch: when filename is different from the previous one. */
+  
+  for (auto BB : BasicBlocksToInsert) {
+    BasicBlock::iterator IP = BB->getFirstInsertionPt();
+    IRBuilder<> IRB(&(*IP));
+
+    unsigned int cur_loc = basicBlockLocId[BB];
+    unsigned int file_name_hash = basicBlockFileNameId[BB];
+
+    ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+    ConstantInt *CurFileId = ConstantInt::get(Int32Ty, file_name_hash);
+
+    LoadInst * PrevFileId = IRB.CreateLoad(AFLPrevFileId);
+    LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+
+    PrevFileId->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+
+    // Only when prevFileId != curFileId, do the following:
+    
+    auto thenInst = SplitBlockAndInsertIfThen(IRB.CreateICmpNE(PrevFileId, CurFileId), &(*IP), false);
+
+#define  IRB IRBthen
+    // edge_id = cur_loc ^ prev_loc
+    // old = prev_locs[cur_index]
+    // new_area_index = area_index >> 2 ^ edge_id ^ (old >> 2 * COUNT)
+    // ++ area[new_area_index]
+    // cur_index = (++ cur_index) % COUNT
+    // area_index = new_area_index
+    
+    IRBuilder<> IRBthen(thenInst);
+
+    PrevFileId = IRBthen.CreateLoad(AFLPrevFileId);
+    PrevLoc = IRBthen.CreateLoad(AFLPrevLoc);
+    LoadInst * CurIndex = IRBthen.CreateLoad(AFLCurIndex);
+    LoadInst * AreaIndex = IRBthen.CreateLoad(AFLAreaIndex);
+    LoadInst * PrevLocsPtr = IRBthen.CreateLoad(AFLPrevLocsPtr);
+    LoadInst *MapPtr = IRBthen.CreateLoad(AFLMapPtr);
+
+    PrevFileId ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    PrevLoc    ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    CurIndex   ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    AreaIndex  ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    PrevLocsPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    MapPtr     ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    
+    Value *PrevLocCasted = IRBthen.CreateZExt(PrevLoc, IRBthen.getInt32Ty());
+    Value *CurEdgeId = IRBthen.CreateXor(CurLoc, PrevLocCasted); // edge_id = cur_loc ^ prev_loc
+    Value *OldPtrIdx    = IRBthen.CreateGEP(PrevLocsPtr, CurIndex);
+    LoadInst * Old = IRBthen.CreateLoad(OldPtrIdx);              // old     = prev_locs[cur_index]
+
+    Old        ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    
+    Value * newAreaIndex = IRBthen.CreateXor(IRBthen.CreateXor(IRBthen.CreateLShr(AreaIndex, ConstantInt::get(Int32Ty, 2)),
+							       IRBthen.CreateLShr(Old, ConstantInt::get(Int32Ty, 2 * path_count))),
+					     CurEdgeId);
+
+    Value *MapPtrIdx = IRBthen.CreateGEP(MapPtr, newAreaIndex);
+
+    LoadInst *Counter = IRBthen.CreateLoad(MapPtrIdx);
+    Counter    ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+    Value *Incr = IRBthen.CreateAdd(Counter, ConstantInt::get(Int8Ty, 1));
+
+    IRBthen.CreateStore(Incr, MapPtrIdx)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // ++ area[area_index]
+    IRBthen.CreateStore(CurEdgeId, OldPtrIdx)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // prev_locs[cur_index] = edge_id
+    IRBthen.CreateStore(newAreaIndex, AFLAreaIndex)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // area_index = new_area_index
+
+    Value *Neq = IRBthen.CreateICmpNE(CurIndex, ConstantInt::get(Int32Ty, path_count - 1));
+    Value *CurIndexNew = IRBthen.CreateMul(IRBthen.CreateAdd(CurIndex, ConstantInt::get(Int32Ty, 1)),
+    					   IRBthen.CreateZExt(Neq, IRBthen.getInt32Ty()));
+    
+    IRBthen.CreateStore(CurIndexNew, AFLCurIndex)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+#undef   IRB
+  }
+
+  inst_blocks += BasicBlocksToInsert.size();
 
   /* Say something nice. */
 
