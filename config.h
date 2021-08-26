@@ -359,4 +359,14 @@
 
 // #define IGNORE_FINDS
 
+/**********************
+  ADD BY Jingzhou Fu
+ **********************/
+
+#define LLVM_MAX_LOC_COUNT  10
+
+/**********************
+  ADD BY Jingzhou Fu END
+ **********************/
+
 #endif /* ! _HAVE_CONFIG_H */
