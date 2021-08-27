@@ -96,6 +96,12 @@ namespace {
 	} else {
 	  path_count = 2;
 	}
+
+	char * cross_file_only_str = getenv("AFL_CROSS_FILE_ONLY");
+
+	if (cross_file_only_str) {
+	  cross_file_only = 1;
+	}
       }
 
       bool runOnModule(Module &M) override;
@@ -191,6 +197,8 @@ namespace {
     std::list<std::string> myWhitelist;
 
     int path_count;
+
+    u32 cross_file_only = 0;
   };
 }
 
@@ -250,6 +258,12 @@ bool AFLCoverage::runOnModule(Module &M) {
 			 // );
 			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
+  GlobalVariable *AFLPrevLocsCountPtr =
+      new GlobalVariable(M, PointerType::get(Int32Ty, 0), false,
+                         GlobalValue::ExternalLinkage, 0, "__afl_prev_locs_count"
+			 // );
+			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+  
   GlobalVariable *AFLCurIndex = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_cur_index"
 						   // );
@@ -258,9 +272,8 @@ bool AFLCoverage::runOnModule(Module &M) {
   GlobalVariable *AFLAreaIndex = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_area_index"
 						    // );
-      , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);  
+      , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);    
   
-
   /* Instrument all the things! */
 
   int inst_blocks = 0;
@@ -315,41 +328,50 @@ bool AFLCoverage::runOnModule(Module &M) {
   /* Add If branch: when filename is different from the previous one. */
   
   for (auto BB : BasicBlocksToInsert) {
-    BasicBlock::iterator IP = BB->getFirstInsertionPt();
-    IRBuilder<> IRB(&(*IP));
-
+    Instruction * thenInst;
     unsigned int cur_loc = basicBlockLocId[BB];
     unsigned int file_name_hash = basicBlockFileNameId[BB];
 
     ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
     ConstantInt *CurFileId = ConstantInt::get(Int32Ty, file_name_hash);
-
-    LoadInst * PrevFileId = IRB.CreateLoad(AFLPrevFileId);
-    LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
-
-    PrevFileId->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-    PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-
-    // Only when prevFileId != curFileId, do the following:
     
-    auto thenInst = SplitBlockAndInsertIfThen(IRB.CreateICmpNE(PrevFileId, CurFileId), &(*IP), false);
+    {
+      BasicBlock::iterator IP = BB->getFirstInsertionPt();
+      IRBuilder<> IRB(&(*IP));
+
+      LoadInst * PrevFileId = IRB.CreateLoad(AFLPrevFileId);
+      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+
+      PrevFileId->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+      // Only when prevFileId != curFileId, do the following:
+
+      if (cross_file_only) {
+	thenInst = SplitBlockAndInsertIfThen(IRB.CreateICmpNE(PrevFileId, CurFileId), &(*IP), false);
+      } else {
+	thenInst = SplitBlockAndInsertIfThen(ConstantInt::get(Int8Ty, 1), &(*IP), false);
+      }
+    }
 
 #define  IRB IRBthen
     // edge_id = cur_loc ^ prev_loc
     // old = prev_locs[cur_index]
-    // new_area_index = area_index >> 2 ^ edge_id ^ (old >> 2 * COUNT)
+    // -- prev_locs_count[old];
+    // new_area_index = area_index ^ (edge_id >> prev_locs_count[edge_id]) ^ (old >> prev_locs_count[old]);
+    // ++ prev_locs_count[edge_id];
     // ++ area[new_area_index]
     // cur_index = (++ cur_index) % COUNT
     // area_index = new_area_index
     
     IRBuilder<> IRBthen(thenInst);
 
-    PrevFileId = IRBthen.CreateLoad(AFLPrevFileId);
-    PrevLoc = IRBthen.CreateLoad(AFLPrevLoc);
+    LoadInst * PrevFileId = IRBthen.CreateLoad(AFLPrevFileId);
+    LoadInst * PrevLoc = IRBthen.CreateLoad(AFLPrevLoc);
     LoadInst * CurIndex = IRBthen.CreateLoad(AFLCurIndex);
     LoadInst * AreaIndex = IRBthen.CreateLoad(AFLAreaIndex);
     LoadInst * PrevLocsPtr = IRBthen.CreateLoad(AFLPrevLocsPtr);
+    LoadInst * PrevLocsCountPtr = IRBthen.CreateLoad(AFLPrevLocsCountPtr);
     LoadInst *MapPtr = IRBthen.CreateLoad(AFLMapPtr);
 
     PrevFileId ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
@@ -357,35 +379,74 @@ bool AFLCoverage::runOnModule(Module &M) {
     CurIndex   ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     AreaIndex  ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     PrevLocsPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    PrevLocsCountPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     MapPtr     ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-    
-    Value *PrevLocCasted = IRBthen.CreateZExt(PrevLoc, IRBthen.getInt32Ty());
-    Value *CurEdgeId = IRBthen.CreateXor(CurLoc, PrevLocCasted); // edge_id = cur_loc ^ prev_loc
-    Value *OldPtrIdx    = IRBthen.CreateGEP(PrevLocsPtr, CurIndex);
-    LoadInst * Old = IRBthen.CreateLoad(OldPtrIdx);              // old     = prev_locs[cur_index]
 
-    Old        ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    //
+    // edge_id = cur_loc ^ prev_loc
+    //
+    Value *PrevLocCasted = IRBthen.CreateZExt(PrevLoc, IRBthen.getInt32Ty());
+    Value *CurEdgeId = IRBthen.CreateXor(CurLoc, PrevLocCasted);
+
     
-    Value * newAreaIndex = IRBthen.CreateXor(IRBthen.CreateXor(IRBthen.CreateLShr(AreaIndex, ConstantInt::get(Int32Ty, 2)),
-							       IRBthen.CreateLShr(Old, ConstantInt::get(Int32Ty, 2 * path_count))),
-					     CurEdgeId);
+    //
+    // old = prev_locs[cur_index]
+    //
+    Value *OldPtrIdx    = IRBthen.CreateGEP(PrevLocsPtr, CurIndex);
+    LoadInst * Old = IRBthen.CreateLoad(OldPtrIdx);
+    
+    Old        ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+    
+    //
+    // prev_locs_count[old] = new_old_count = prev_locs_count[old] - 1
+    //
+    Value *OldCountIdx = IRBthen.CreateGEP(PrevLocsCountPtr, Old);
+    LoadInst *OldCount = IRBthen.CreateLoad(OldCountIdx);
+    
+    OldCount   ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    
+    Value *newOldCount = IRBthen.CreateSub(OldCount, ConstantInt::get(Int32Ty, 1));
+
+    IRBthen.CreateStore(newOldCount, OldCountIdx)  ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+    
+    //
+    // new_cur_edge_count = prev_locs_count[cur_edge_id] + 1;
+    //
+    Value *CurEdgeCountIdx = IRBthen.CreateGEP(PrevLocsCountPtr, CurEdgeId);
+    LoadInst *CurEdgeCount = IRBthen.CreateLoad(CurEdgeCountIdx);
+
+    CurEdgeCount->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    
+    Value *newCurEdgeCount = IRBthen.CreateAdd(CurEdgeCount, ConstantInt::get(Int32Ty, 1));
+
+    
+    //
+    // new_area_index = area_index ^ (edge_id >> prev_locs_count[edge_id]) ^ (old >> new_old_count)
+    //
+    Value * newAreaIndex = IRBthen.CreateXor(IRBthen.CreateXor(IRBthen.CreateLShr(CurEdgeId, CurEdgeCount),
+							       IRBthen.CreateLShr(Old, newOldCount)),
+					     AreaIndex);
+
 
     Value *MapPtrIdx = IRBthen.CreateGEP(MapPtr, newAreaIndex);
 
     LoadInst *Counter = IRBthen.CreateLoad(MapPtrIdx);
-    Counter    ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    Counter     ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
     Value *Incr = IRBthen.CreateAdd(Counter, ConstantInt::get(Int8Ty, 1));
 
-    IRBthen.CreateStore(Incr, MapPtrIdx)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // ++ area[area_index]
-    IRBthen.CreateStore(CurEdgeId, OldPtrIdx)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // prev_locs[cur_index] = edge_id
+    IRBthen.CreateStore(Incr, MapPtrIdx)           ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // ++ area[area_index]
+    IRBthen.CreateStore(CurEdgeId, OldPtrIdx)      ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // prev_locs[cur_index] = edge_id
     IRBthen.CreateStore(newAreaIndex, AFLAreaIndex)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // area_index = new_area_index
+    IRBthen.CreateStore(newCurEdgeCount, CurEdgeCountIdx)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // prev_locs_count[edge_id] = new_cur_edge_count
 
     Value *Neq = IRBthen.CreateICmpNE(CurIndex, ConstantInt::get(Int32Ty, path_count - 1));
     Value *CurIndexNew = IRBthen.CreateMul(IRBthen.CreateAdd(CurIndex, ConstantInt::get(Int32Ty, 1)),
     					   IRBthen.CreateZExt(Neq, IRBthen.getInt32Ty()));
     
-    IRBthen.CreateStore(CurIndexNew, AFLCurIndex)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    IRBthen.CreateStore(CurIndexNew, AFLCurIndex)  ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // cur_index = (++ cur_index) % COUNT
 
 #undef   IRB
   }
@@ -397,10 +458,10 @@ bool AFLCoverage::runOnModule(Module &M) {
   if (!be_quiet) {
  
     if (!inst_blocks) WARNF("No instrumentation targets found.");
-    else OKF("Instrumented %u locations (%s mode, ratio %u%%).",
+    else OKF("Instrumented %u locations (%s mode, ratio %u%%, cross_file_only? %u).",
              inst_blocks, getenv("AFL_HARDEN") ? "hardened" :
              ((getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN")) ?
-              "ASAN/MSAN" : "non-hardened"), inst_ratio);
+              "ASAN/MSAN" : "non-hardened"), inst_ratio, cross_file_only);
 
     fprintf(stderr, "[filenames]: ");
     for (const auto & filename : filenameSet) {
