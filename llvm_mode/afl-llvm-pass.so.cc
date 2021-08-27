@@ -43,6 +43,7 @@
 #include <fstream>
 #include <vector>
 #include <map>
+#include <set>
 
 #if defined(LLVM34)
 #include "llvm/DebugInfo.h"
@@ -267,8 +268,9 @@ bool AFLCoverage::runOnModule(Module &M) {
   std::vector<BasicBlock*> BasicBlocksToInsert;
   std::map<BasicBlock*, unsigned int> basicBlockLocId;
   std::map<BasicBlock*, unsigned int> basicBlockFileNameId;
+  std::set<std::string> filenameSet;
   
-  for (auto &F : M)
+  for (auto &F : M) {
     for (auto &BB : F) {
       std::string filename;
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
@@ -276,11 +278,13 @@ bool AFLCoverage::runOnModule(Module &M) {
       if (!getInstFileName(&*IP, filename)) continue;
       if (!checkInWhiteList(filename)) continue;
       if (AFL_R(100) >= inst_ratio) continue;
-      
+
+      filenameSet.insert(filename);
       BasicBlocksToInsert.push_back(&BB);
       basicBlockLocId[&BB] = AFL_R(MAP_SIZE);
       basicBlockFileNameId[&BB] = custom_hash(filename.c_str());
     }
+  }
 
   /* Normal: update previous file id and previous loc. */
   for (auto BB : BasicBlocksToInsert) {
@@ -398,6 +402,11 @@ bool AFLCoverage::runOnModule(Module &M) {
              ((getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN")) ?
               "ASAN/MSAN" : "non-hardened"), inst_ratio);
 
+    fprintf(stderr, "[filenames]: ");
+    for (const auto & filename : filenameSet) {
+      fprintf(stderr, "%s,", filename.c_str());
+    }
+    fprintf(stderr, "\n");
   }
 
   return true;
