@@ -115,7 +115,7 @@ namespace {
       return hash_value;
     }
 
-    bool getInstFileName(Instruction * IP, std::string & filename) {
+    bool getInstFileName(Instruction * IP, std::string & filename, unsigned int &instLine, unsigned int &instColumn) {
       /* Make up file id */
       
       DebugLoc Loc = IP->getDebugLoc();
@@ -130,18 +130,21 @@ namespace {
 	    DILocation cDILoc(Loc.getAsMDNode(M.getContext()));
 	    DILocation oDILoc = cDILoc.getOrigLocation();
 	    
-	    unsigned int instLine = oDILoc.getLineNumber();
+	    instLine = oDILoc.getLineNumber();
+	    instColumn = cDILoc.getColumnNumber();
 	    StringRef instFilename = oDILoc.getFilename();
 	    
 	    if (instFilename.str().empty()) {
 	      /* If the original location is empty, use the actual location */
 	      instFilename = cDILoc.getFilename();
 	      instLine = cDILoc.getLineNumber();
+	      instColumn = cDILoc.getColumnNumber();
 	    }
 #else
 	    DILocation *cDILoc = dyn_cast<DILocation>(Loc.getAsMDNode());
 
-	    unsigned int instLine = cDILoc->getLine();
+	    instLine = cDILoc->getLine();
+	    instColumn = cDILoc->getColumn();
 	    StringRef instFilename = cDILoc->getFilename();
 
 	    if (instFilename.str().empty()) {
@@ -150,6 +153,7 @@ namespace {
 	      if (oDILoc) {
 		instFilename = oDILoc->getFilename();
 		instLine = oDILoc->getLine();
+		instColumn = oDILoc->getColumn();
 	      }
 	    }
 
@@ -273,15 +277,18 @@ bool AFLCoverage::runOnModule(Module &M) {
   for (auto &F : M) {
     for (auto &BB : F) {
       std::string filename;
+      unsigned int instLine, instColumn;
+      
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
 
-      if (!getInstFileName(&*IP, filename)) continue;
+      if (!getInstFileName(&*IP, filename, instLine, instColumn)) continue;
       if (!checkInWhiteList(filename)) continue;
       if (AFL_R(100) >= inst_ratio) continue;
 
       filenameSet.insert(filename);
       BasicBlocksToInsert.push_back(&BB);
-      basicBlockLocId[&BB] = AFL_R(MAP_SIZE);
+      basicBlockLocId[&BB] = custom_hash((filename + ":" + std::to_string(instLine) + ":" + std::to_string(instColumn)).c_str()) % MAP_SIZE;
+      // AFL_R(MAP_SIZE);
       basicBlockFileNameId[&BB] = custom_hash(filename.c_str());
     }
   }
