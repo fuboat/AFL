@@ -253,7 +253,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 		       , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
   ArrayType * ArrayTy0 = ArrayType::get(Int32Ty, LLVM_MAX_LOC_COUNT);
-  ArrayType * ArrayTy1 = ArrayType::get(Int32Ty, LLVM_MAX_LOC_COUNT);
+  ArrayType * ArrayTy1 = ArrayType::get(Int32Ty, MAP_SIZE);
 
   GlobalVariable *AFLPrevLocsPtr =
       new GlobalVariable(M, ArrayTy0, false,
