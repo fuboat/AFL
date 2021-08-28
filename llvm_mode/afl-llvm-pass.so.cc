@@ -287,7 +287,8 @@ bool AFLCoverage::runOnModule(Module &M) {
 
       filenameSet.insert(filename);
       BasicBlocksToInsert.push_back(&BB);
-      basicBlockLocId[&BB] = custom_hash((filename + ":" + std::to_string(instLine) + ":" + std::to_string(instColumn)).c_str()) % MAP_SIZE;
+      basicBlockLocId[&BB] = AFL_R(MAP_SIZE);
+      // custom_hash((filename + ":" + std::to_string(instLine) + ":" + std::to_string(instColumn)).c_str()) % MAP_SIZE;
       // AFL_R(MAP_SIZE);
       basicBlockFileNameId[&BB] = custom_hash(filename.c_str());
     }
