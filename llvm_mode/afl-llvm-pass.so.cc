@@ -248,12 +248,23 @@ bool AFLCoverage::runOnModule(Module &M) {
 		       // );
 		       , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
+  ArrayType* ArrayTy_0 = ArrayType::get(IntegerType::get(C, 32), LLVM_MAX_LOC_COUNT);
+  
+  GlobalVariable *AFLPrevLocsArray =
+      new GlobalVariable(M, ArrayTy_0, false,
+                         GlobalValue::ExternalLinkage, 0, "__afl_prev_locs"
+			 // );
+			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+  
   GlobalVariable *AFLPrevLocsPtr =
-      new GlobalVariable(M, PointerType::get(Int32Ty, 0), false,
+      new GlobalVariable(M, ArrayTy_0, false,
                          GlobalValue::ExternalLinkage, 0, "__afl_prev_locs"
 			 // );
 			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
+  // AFLPrevLocsArray->setAlignment(4);
+  // AFLPrevLocsPtr->setAlignment(4);
+  
   GlobalVariable *AFLCurIndex = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_cur_index"
 						   // );
@@ -357,19 +368,22 @@ bool AFLCoverage::runOnModule(Module &M) {
     PrevLoc = IRBthen.CreateLoad(AFLPrevLoc);
     LoadInst * CurIndex = IRBthen.CreateLoad(AFLCurIndex);
     LoadInst * AreaIndex = IRBthen.CreateLoad(AFLAreaIndex);
-    LoadInst * PrevLocsPtr = IRBthen.CreateLoad(AFLPrevLocsPtr);
+    LoadInst * PrevLocsArray = IRBthen.CreateLoad(AFLPrevLocsArray);
     LoadInst *MapPtr = IRBthen.CreateLoad(AFLMapPtr);
 
     PrevFileId ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     PrevLoc    ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     CurIndex   ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     AreaIndex  ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-    PrevLocsPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    PrevLocsArray->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     MapPtr     ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     
     Value *PrevLocCasted = IRBthen.CreateZExt(PrevLoc, IRBthen.getInt32Ty());
     Value *CurEdgeId = IRBthen.CreateXor(CurLoc, PrevLocCasted); // edge_id = cur_loc ^ prev_loc
-    Value *OldPtrIdx    = IRBthen.CreateGEP(PrevLocsPtr, CurIndex);
+    Value *PrevLocsPtr = IRBthen.CreatePointerCast(AFLPrevLocsArray, Int32Ty->getPointerTo());
+    // ConstantInt* const_int32_4 = ConstantInt::get(mod->getContext(), APInt(32, StringRef("0"), 10));
+    auto OldPtrIdx    = IRBthen.CreateGEP(PrevLocsPtr, CurIndex);
+    // auto OldPtrIdx = GetElementPtrInst::Create(AFLPrevLocsArray, {ConstantInt::get(Int32Ty, 0), CurIndex}, "", thenInst);
     LoadInst * Old = IRBthen.CreateLoad(OldPtrIdx);              // old     = prev_locs[cur_index]
 
     Old        ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));

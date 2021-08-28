@@ -63,9 +63,7 @@ u8* __afl_area_ptr = __afl_area_initial;
 __thread u32 __afl_prev_loc;
 __thread u32 __afl_prev_file_id;
 
-u32 __afl_prev_locs_initial[LLVM_MAX_LOC_COUNT];
-__thread u32 __afl_prev_locs_thread[LLVM_MAX_LOC_COUNT];
-__thread u32*__afl_prev_locs = __afl_prev_locs_initial;
+__thread u32 __afl_prev_locs[LLVM_MAX_LOC_COUNT];
 __thread u32 __afl_cur_index;
 __thread u32 __afl_area_index;
 
@@ -100,7 +98,6 @@ static void __afl_map_shm(void) {
     __afl_area_ptr[0] = 1;
 
     __afl_prev_loc = __afl_prev_file_id = 0;
-    __afl_prev_locs = __afl_prev_locs_thread;
     memset(__afl_prev_locs, 0, LLVM_MAX_LOC_COUNT * sizeof(u32));
     __afl_cur_index = __afl_area_index = 0;
   }
@@ -208,7 +205,6 @@ int __afl_persistent_loop(unsigned int max_cnt) {
       memset(__afl_area_ptr, 0, MAP_SIZE);
       __afl_area_ptr[0] = 1;
       __afl_prev_loc = __afl_prev_file_id = 0;
-      __afl_prev_locs = __afl_prev_locs_thread;
       memset(__afl_prev_locs, 0, LLVM_MAX_LOC_COUNT * sizeof(u32));
       __afl_cur_index = __afl_area_index = 0;
     }
@@ -227,7 +223,6 @@ int __afl_persistent_loop(unsigned int max_cnt) {
 
       __afl_area_ptr[0] = 1;
       __afl_prev_loc = __afl_prev_file_id = 0;
-      __afl_prev_locs = __afl_prev_locs_thread;
       memset(__afl_prev_locs, 0, LLVM_MAX_LOC_COUNT * sizeof(u32));
       __afl_cur_index = __afl_area_index = 0;
       
