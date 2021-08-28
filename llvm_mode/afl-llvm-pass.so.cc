@@ -252,15 +252,18 @@ bool AFLCoverage::runOnModule(Module &M) {
 		       // );
 		       , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
+  ArrayType * ArrayTy0 = ArrayType::get(Int32Ty, LLVM_MAX_LOC_COUNT);
+  ArrayType * ArrayTy1 = ArrayType::get(Int32Ty, LLVM_MAX_LOC_COUNT);
+
   GlobalVariable *AFLPrevLocsPtr =
-      new GlobalVariable(M, PointerType::get(Int32Ty, 0), false,
-                         GlobalValue::ExternalLinkage, 0, "__afl_prev_locs"
+      new GlobalVariable(M, ArrayTy0, false,
+                         GlobalValue::ExternalLinkage, 0, "__afl_prev_locs_thread"
 			 // );
 			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
   GlobalVariable *AFLPrevLocsCountPtr =
-      new GlobalVariable(M, PointerType::get(Int32Ty, 0), false,
-                         GlobalValue::ExternalLinkage, 0, "__afl_prev_locs_count"
+      new GlobalVariable(M, ArrayTy1, false,
+                         GlobalValue::ExternalLinkage, 0, "__afl_prev_locs_count_thread"
 			 // );
 			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
   
@@ -370,16 +373,18 @@ bool AFLCoverage::runOnModule(Module &M) {
     LoadInst * PrevLoc = IRBthen.CreateLoad(AFLPrevLoc);
     LoadInst * CurIndex = IRBthen.CreateLoad(AFLCurIndex);
     LoadInst * AreaIndex = IRBthen.CreateLoad(AFLAreaIndex);
-    LoadInst * PrevLocsPtr = IRBthen.CreateLoad(AFLPrevLocsPtr);
-    LoadInst * PrevLocsCountPtr = IRBthen.CreateLoad(AFLPrevLocsCountPtr);
+    // LoadInst * PrevLocsPtr = IRBthen.CreateLoad(AFLPrevLocsPtr);
+    // LoadInst * PrevLocsCountPtr = IRBthen.CreateLoad(AFLPrevLocsCountPtr);
+    Value * PrevLocsPtr = IRBthen.CreatePointerCast(AFLPrevLocsPtr, Int32Ty->getPointerTo());
+    Value * PrevLocsCountPtr = IRBthen.CreatePointerCast(AFLPrevLocsCountPtr, Int32Ty->getPointerTo());
     LoadInst *MapPtr = IRBthen.CreateLoad(AFLMapPtr);
 
     PrevFileId ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     PrevLoc    ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     CurIndex   ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     AreaIndex  ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-    PrevLocsPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-    PrevLocsCountPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    // PrevLocsPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+    // PrevLocsCountPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     MapPtr     ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
     //
