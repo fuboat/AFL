@@ -81,10 +81,26 @@ namespace {
 
           std::string line;
           getline(fileStream, line);
+
+	  unsigned int fileId = 0;
+	  
           while (fileStream) {
             myWhitelist.push_back(line);
             getline(fileStream, line);
+	    filenameIdMap[line] = fileId;
+
+	    // If we get an empty line, it means a new set of files, which has unique id.
+	    
+	    if (line.empty()) {
+	      ++ fileId;
+	    }
           }
+
+	  // If only one set, we give every file unique id.
+	  
+	  if (fileId <= 1) {
+	    filenameIdMap.clear();
+	  }
         }
 
 	char * path_count_str = getenv("AFL_PATH_COUNT");
@@ -195,6 +211,7 @@ namespace {
     
   protected:
     std::list<std::string> myWhitelist;
+    std::map<std::string, unsigned int> filenameIdMap;
 
     int path_count;
 
@@ -298,7 +315,7 @@ bool AFLCoverage::runOnModule(Module &M) {
       filenameSet.insert(filename);
       BasicBlocksToInsert.push_back(&BB);
       basicBlockLocId[&BB] = AFL_R(MAP_SIZE);
-      basicBlockFileNameId[&BB] = custom_hash(filename.c_str());
+      basicBlockFileNameId[&BB] = filenameIdMap.count(filename)? filenameIdMap[filename] : custom_hash(filename.c_str());
     }
   }
 
