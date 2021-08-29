@@ -137,7 +137,7 @@ namespace {
       return hash_value;
     }
 
-    bool getInstFileName(Instruction * IP, std::string & filename) {
+    bool getInstFileName(Instruction * IP, std::string & filename, unsigned int &instLine, unsigned int &instColumn) {
       /* Make up file id */
       
       DebugLoc Loc = IP->getDebugLoc();
@@ -152,18 +152,21 @@ namespace {
 	    DILocation cDILoc(Loc.getAsMDNode(M.getContext()));
 	    DILocation oDILoc = cDILoc.getOrigLocation();
 	    
-	    unsigned int instLine = oDILoc.getLineNumber();
+	    instLine = oDILoc.getLineNumber();
+	    instColumn = cDILoc.getColumnNumber();
 	    StringRef instFilename = oDILoc.getFilename();
 	    
 	    if (instFilename.str().empty()) {
 	      /* If the original location is empty, use the actual location */
 	      instFilename = cDILoc.getFilename();
 	      instLine = cDILoc.getLineNumber();
+	      instColumn = cDILoc.getColumnNumber();
 	    }
 #else
 	    DILocation *cDILoc = dyn_cast<DILocation>(Loc.getAsMDNode());
 
-	    unsigned int instLine = cDILoc->getLine();
+	    instLine = cDILoc->getLine();
+	    instColumn = cDILoc->getColumn();
 	    StringRef instFilename = cDILoc->getFilename();
 
 	    if (instFilename.str().empty()) {
@@ -172,6 +175,7 @@ namespace {
 	      if (oDILoc) {
 		instFilename = oDILoc->getFilename();
 		instLine = oDILoc->getLine();
+		instColumn = oDILoc->getColumn();
 	      }
 	    }
 
@@ -184,8 +188,8 @@ namespace {
 	  return false;
 	}      
     }
-
-    bool checkInWhiteList(const std::string & filename) {
+    
+    bool checkInWhiteList(const std::string & filename, unsigned int & fileId) {
       /* Continue only if we know where we actually are */
       if (!myWhitelist.empty()) {
 	/* If whitelist is not empty, we only insert inst into files in list. */
@@ -197,16 +201,20 @@ namespace {
 	   * specified in the list. */
 	  if (filename.length() >= it->length() && it->length() > 0) {
 	    if (filename.compare(filename.length() - it->length(), it->length(), *it) == 0) {
+	      fileId = filenameIdMap[*it];
 	      return true;
 	    }
 	  }
 	}
 
 	/* If file name is not in list, then do nothing. */
+	fileId = custom_hash(filename.c_str());
 	return false;
+      } else {
+	/* whit list is empty: hash fileId */
+	fileId = custom_hash(filename.c_str());;
+	return true;
       }
-
-      return true;
     }
     
   protected:
@@ -306,16 +314,18 @@ bool AFLCoverage::runOnModule(Module &M) {
   for (auto &F : M) {
     for (auto &BB : F) {
       std::string filename;
+      unsigned int instLine, instColumn, fileId;
+      
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
 
-      if (!getInstFileName(&*IP, filename)) continue;
-      if (!checkInWhiteList(filename)) continue;
+      if (!getInstFileName(&*IP, filename, instLine, instColumn)) continue;
+      if (!checkInWhiteList(filename, fileId)) continue;
       if (AFL_R(100) >= inst_ratio) continue;
-
+      
       filenameSet.insert(filename);
       BasicBlocksToInsert.push_back(&BB);
-      basicBlockLocId[&BB] = AFL_R(MAP_SIZE);
-      basicBlockFileNameId[&BB] = filenameIdMap.count(filename)? filenameIdMap[filename] : custom_hash(filename.c_str());
+      basicBlockLocId[&BB] = custom_hash((filename + ":" + std::to_string(instLine) + ":" + std::to_string(instColumn)).c_str()) % MAP_SIZE; // AFL_R(MAP_SIZE)
+      basicBlockFileNameId[&BB] = fileId;
     }
   }
 
