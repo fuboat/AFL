@@ -286,11 +286,14 @@ bool AFLCoverage::runOnModule(Module &M) {
 			 // );
 			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
+  //// Fast Version: do NOT need count.
+  /****
   GlobalVariable *AFLPrevLocsCountPtr =
       new GlobalVariable(M, ArrayTy1, false,
                          GlobalValue::ExternalLinkage, 0, "__afl_prev_locs_count_thread"
 			 // );
 			 , 0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+  ****/
   
   GlobalVariable *AFLCurIndex = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_cur_index"
@@ -393,6 +396,12 @@ bool AFLCoverage::runOnModule(Module &M) {
     // ++ area[new_area_index]
     // cur_index = (++ cur_index) % COUNT
     // area_index = new_area_index
+
+    /***************************
+     * Fast Version: not consider prev_locs_count, just xor the id always.
+     * It means: new_area_index = area_index ^ edge_id ^ old;
+     * So we do not need prev_locs_count[] anymore.
+     ***************************/
     
     IRBuilder<> IRBthen(thenInst);
 
@@ -403,7 +412,7 @@ bool AFLCoverage::runOnModule(Module &M) {
     // LoadInst * PrevLocsPtr = IRBthen.CreateLoad(AFLPrevLocsPtr);
     // LoadInst * PrevLocsCountPtr = IRBthen.CreateLoad(AFLPrevLocsCountPtr);
     Value * PrevLocsPtr = IRBthen.CreatePointerCast(AFLPrevLocsPtr, Int32Ty->getPointerTo());
-    Value * PrevLocsCountPtr = IRBthen.CreatePointerCast(AFLPrevLocsCountPtr, Int32Ty->getPointerTo());
+    // Value * PrevLocsCountPtr = IRBthen.CreatePointerCast(AFLPrevLocsCountPtr, Int32Ty->getPointerTo()); // Fast Version: We do not need PrevLocsCount anymoe.
     LoadInst *MapPtr = IRBthen.CreateLoad(AFLMapPtr);
 
     PrevFileId ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
@@ -433,6 +442,8 @@ bool AFLCoverage::runOnModule(Module &M) {
     //
     // prev_locs_count[old] = new_old_count = prev_locs_count[old] - 1
     //
+    //// Fast Version: do NOT need count
+    /****
     Value *OldCountIdx = IRBthen.CreateGEP(PrevLocsCountPtr, Old);
     LoadInst *OldCount = IRBthen.CreateLoad(OldCountIdx);
     
@@ -441,25 +452,33 @@ bool AFLCoverage::runOnModule(Module &M) {
     Value *newOldCount = IRBthen.CreateSub(OldCount, ConstantInt::get(Int32Ty, 1));
 
     IRBthen.CreateStore(newOldCount, OldCountIdx)  ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
+    ****/
     
     //
     // new_cur_edge_count = prev_locs_count[cur_edge_id] + 1;
     //
+    //// Fast Version: do NOT need count
+    /****
     Value *CurEdgeCountIdx = IRBthen.CreateGEP(PrevLocsCountPtr, CurEdgeId);
     LoadInst *CurEdgeCount = IRBthen.CreateLoad(CurEdgeCountIdx);
 
     CurEdgeCount->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
     
     Value *newCurEdgeCount = IRBthen.CreateAdd(CurEdgeCount, ConstantInt::get(Int32Ty, 1));
-
+    ****/
     
     //
     // new_area_index = area_index ^ (edge_id >> prev_locs_count[edge_id]) ^ (old >> new_old_count)
     //
+    //// Fast Version: do Not Need count, just use ID straightly.
+    /****
     Value * newAreaIndex = IRBthen.CreateXor(IRBthen.CreateXor(IRBthen.CreateLShr(CurEdgeId, CurEdgeCount),
-							       IRBthen.CreateLShr(Old, newOldCount)),
+    							       IRBthen.CreateLShr(Old, newOldCount)),
+     					     AreaIndex);
+    ****/
+    Value * newAreaIndex = IRBthen.CreateXor(IRBthen.CreateXor(CurEdgeId, Old),
 					     AreaIndex);
+
 
 
     Value *MapPtrIdx = IRBthen.CreateGEP(MapPtr, newAreaIndex);
@@ -472,7 +491,10 @@ bool AFLCoverage::runOnModule(Module &M) {
     IRBthen.CreateStore(Incr, MapPtrIdx)           ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // ++ area[area_index]
     IRBthen.CreateStore(CurEdgeId, OldPtrIdx)      ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // prev_locs[cur_index] = edge_id
     IRBthen.CreateStore(newAreaIndex, AFLAreaIndex)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // area_index = new_area_index
+    //// Fast Version: do Not Need count
+    /****
     IRBthen.CreateStore(newCurEdgeCount, CurEdgeCountIdx)->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None)); // prev_locs_count[edge_id] = new_cur_edge_count
+    ****/
 
     Value *Neq = IRBthen.CreateICmpNE(CurIndex, ConstantInt::get(Int32Ty, path_count - 1));
     Value *CurIndexNew = IRBthen.CreateMul(IRBthen.CreateAdd(CurIndex, ConstantInt::get(Int32Ty, 1)),
